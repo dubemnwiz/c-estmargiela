@@ -1,5 +1,14 @@
-# On Start
+# C'est Margiela — Fashion Image Retrieval Engine
 
-conda activate margiela
-python scripts/build_item_index_siglip.py
-python scripts/eval_item_retrieval_siglip.py
+C’est Margiela is a vision-based retrieval system that identifies iconic Maison Margiela garments from user-submitted photos.
+Instead of classification, the system uses deep metric learning:
+
+Embed images with SigLIP
+
+Store all catalog embeddings in a FAISS index
+
+Retrieve the nearest garments via k-NN search
+
+This repository contains the core dataset manifests, embedding scripts, evaluation code, and the skeleton for an API that answers:
+
+“Which Margiela piece is this?”
