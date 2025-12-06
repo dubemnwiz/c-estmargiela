@@ -1,0 +1,39 @@
+# ===== DATA (DO NOT UPLOAD) =====
+data/derivs/
+data/index/
+data/cache/
+data/tmp/
+data/catalog/margiela/
+
+# allow specific CSVs
+!data/catalog/**/*.csv
+
+# ===== ENVIRONMENTS =====
+env/
+venv/
+.venv/
+.margiela/
+*.egg-info/
+
+# ===== PYTHON =====
+__pycache__/
+*.pyc
+
+# ===== MODEL WEIGHTS / CHECKPOINTS =====
+*.pt
+*.pth
+*.ckpt
+
+# ===== JUPYTER NOISE =====
+.ipynb_checkpoints/
+
+# ===== SYSTEM =====
+.DS_Store
+
+# ===== IDE =====
+.vscode/
+.idea/
+
+# ===== SECRETS =====
+*.env
+.huggingface/
