@@ -4,13 +4,13 @@ import json
 import os
 from pathlib import Path
 
-import faiss # Facebook library for efficient similarity search
-import numpy as np # Numerical computing
-import open_clip # OpenAI's CLIP model library
-import pandas as pd # Data manipulation
-import torch # PyTorch deep learning framework
-from PIL import Image # Image loading and processing
-from tqdm import tqdm # Progress bar display
+import faiss
+import numpy as np
+import open_clip
+import pandas as pd
+import torch
+from PIL import Image
+from tqdm import tqdm
 
 def load_siglip(
     model_name: str = "ViT-B-16-SigLIP",
