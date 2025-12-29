@@ -24,9 +24,10 @@ class GarmentRetriever:
     Loads:
       - FAISS index (L2)
       - meta.json mapping (parallel arrays: image_ids, garment_ids, image_paths)
-      - items.csv for garment_id -> common_name
+      - items.csv for garment_id -> common_name (+ category)
       - SigLIP model for query embedding
     """
+
     def __init__(
         self,
         index_path: str,
@@ -51,12 +52,18 @@ class GarmentRetriever:
         if not (len(self.image_ids) == len(self.garment_ids) == len(self.image_paths)):
             raise ValueError("meta.json arrays must be same length")
 
-        # Load garment names (optional but nice)
+        # Load garment names + categories (optional but nice)
         self.garment_name: Dict[str, str] = {}
+        self.garment_category: Dict[str, str] = {}
+
         if Path(items_csv).exists():
             items_df = pd.read_csv(items_csv)
+
             if "garment_id" in items_df.columns and "common_name" in items_df.columns:
                 self.garment_name = dict(zip(items_df["garment_id"], items_df["common_name"]))
+
+            if "garment_id" in items_df.columns and "category" in items_df.columns:
+                self.garment_category = dict(zip(items_df["garment_id"], items_df["category"]))
 
         # Load SigLIP
         self.model, _, self.preprocess = open_clip.create_model_and_transforms(
@@ -69,9 +76,9 @@ class GarmentRetriever:
     def embed_pil(self, img: Image.Image) -> np.ndarray:
         img = img.convert("RGB")
         x = self.preprocess(img).unsqueeze(0).to(self.device)  # (1, C, H, W)
-        feat = self.model.encode_image(x)                      # (1, d)
-        feat = feat / feat.norm(dim=-1, keepdim=True)         # L2 normalize
-        return feat.cpu().numpy().astype(np.float32)          # (1, d)
+        feat = self.model.encode_image(x)  # (1, d)
+        feat = feat / feat.norm(dim=-1, keepdim=True)  # L2 normalize
+        return feat.cpu().numpy().astype(np.float32)  # (1, d)
 
     def search_images(self, q: np.ndarray, top_k: int = 25) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -90,7 +97,7 @@ class GarmentRetriever:
         This gives a nice similarity-like score in [-1, 1].
         """
         return float(1.0 - (dist_sq / 2.0))
-    
+
     # ---------- Crop V1 helpers ----------
     @staticmethod
     def _crop_full(img: Image.Image) -> Image.Image:
@@ -120,6 +127,7 @@ class GarmentRetriever:
         for d, i in zip(dist_sq.tolist(), idxs.tolist()):
             if i < 0:
                 continue
+
             path = self.image_paths[i]
             if exclude_image_path and path == exclude_image_path:
                 continue
@@ -157,6 +165,62 @@ class GarmentRetriever:
         best = garment_hits[0] if garment_hits else None
         return {"best": best, "top_garments": garment_hits, "top_images": image_hits}
 
+    # ---------- Category-aware helpers ----------
+    def _filter_by_category(self, ranked: List[Dict], allowed: set) -> List[Dict]:
+        out = []
+        for g in ranked:
+            cat = self.garment_category.get(g["garment_id"])
+            if cat in allowed:
+                out.append(g)
+        return out
+
+    def _apply_unknown(self, ranked: List[Dict], threshold: float, margin_thr: float) -> Dict:
+        if not ranked:
+            return {
+                "garment_id": "unknown",
+                "common_name": None,
+                "score": None,
+                "support": 0,
+                "best_crop": None,
+                "margin": None,
+                "reason": "no_candidates",
+            }
+
+        best = ranked[0]
+        second = ranked[1] if len(ranked) > 1 else None
+        margin = (best["score"] - second["score"]) if second else None
+
+        if best["score"] < threshold:
+            return {
+                "garment_id": "unknown",
+                "common_name": None,
+                "score": float(best["score"]),
+                "support": int(best["support"]),
+                "best_crop": best.get("best_crop"),
+                "margin": float(margin) if margin is not None else None,
+                "reason": "below_threshold",
+            }
+
+        if margin is not None and margin < margin_thr:
+            return {
+                "garment_id": "unknown",
+                "common_name": None,
+                "score": float(best["score"]),
+                "support": int(best["support"]),
+                "best_crop": best.get("best_crop"),
+                "margin": float(margin) if margin is not None else None,
+                "reason": "low_margin",
+            }
+
+        return {
+            "garment_id": best["garment_id"],
+            "common_name": best["common_name"],
+            "score": float(best["score"]),
+            "support": int(best["support"]),
+            "best_crop": best.get("best_crop"),
+            "margin": float(margin) if margin is not None else None,
+            "reason": None,
+        }
 
     def predict_garments(
         self,
@@ -179,6 +243,10 @@ class GarmentRetriever:
           - track which crop produced max score
         Unknown:
           - if best.score < threshold OR margin < unknown_margin -> unknown
+        Category-aware multi-output:
+          - best_upper: categories {outerwear, top}
+          - best_lower: categories {footwear}
+          - best_accessory: categories {eyewear, bag, accessory}
         Debug:
           - include top_images + per-crop breakdown
         """
@@ -221,46 +289,43 @@ class GarmentRetriever:
         ranked = sorted(merged.values(), key=lambda x: x["score"], reverse=True)
         top_ranked = ranked[:top_k_garments]
 
-        best = top_ranked[0] if top_ranked else None
-        second = top_ranked[1] if len(top_ranked) > 1 else None
-        margin = (best["score"] - second["score"]) if (best and second) else None
+        # Overall (backward compatible: still returned as "best")
+        best_overall = self._apply_unknown(
+            top_ranked,
+            threshold=unknown_threshold,
+            margin_thr=unknown_margin,
+        )
 
-        is_unknown = False
-        reason = None
-        if best is None:
-            is_unknown = True
-            reason = "no_candidates"
-        else:
-            if best["score"] < unknown_threshold:
-                is_unknown = True
-                reason = "below_threshold"
-            elif margin is not None and margin < unknown_margin:
-                is_unknown = True
-                reason = "low_margin"
+        # Category-aware splits
+        upper_allowed = {"outerwear", "top"}
+        lower_allowed = {"footwear"}
+        accessory_allowed = {"eyewear", "bag", "accessory"}
 
-        best_out = None
-        if is_unknown:
-            best_out = {
-                "garment_id": "unknown",
-                "common_name": None,
-                "score": float(best["score"]) if best else None,
-                "support": int(best["support"]) if best else 0,
-                "best_crop": best["best_crop"] if best else None,
-                "reason": reason,
-                "margin": float(margin) if margin is not None else None,
-            }
-        else:
-            best_out = {
-                "garment_id": best["garment_id"],
-                "common_name": best["common_name"],
-                "score": float(best["score"]),
-                "support": int(best["support"]),
-                "best_crop": best["best_crop"],
-                "margin": float(margin) if margin is not None else None,
-            }
+        ranked_upper = self._filter_by_category(ranked, upper_allowed)[:top_k_garments]
+        ranked_lower = self._filter_by_category(ranked, lower_allowed)[:top_k_garments]
+        ranked_accessory = self._filter_by_category(ranked, accessory_allowed)[:top_k_garments]
+
+        best_upper = self._apply_unknown(
+            ranked_upper,
+            threshold=unknown_threshold,
+            margin_thr=unknown_margin,
+        )
+        best_lower = self._apply_unknown(
+            ranked_lower,
+            threshold=unknown_threshold,
+            margin_thr=unknown_margin,
+        )
+        best_accessory = self._apply_unknown(
+            ranked_accessory,
+            threshold=unknown_threshold,
+            margin_thr=unknown_margin,
+        )
 
         response = {
-            "best": best_out,
+            "best": best_overall,
+            "best_upper": best_upper,
+            "best_lower": best_lower,
+            "best_accessory": best_accessory,
             "top_garments": [
                 {
                     "garment_id": g["garment_id"],
@@ -268,25 +333,28 @@ class GarmentRetriever:
                     "score": float(g["score"]),
                     "support": int(g["support"]),
                     "best_crop": g["best_crop"],
+                    "category": self.garment_category.get(g["garment_id"]),
                 }
                 for g in top_ranked
             ],
             "meta": {
                 "unknown_threshold": float(unknown_threshold),
                 "unknown_margin": float(unknown_margin),
-                "margin": float(margin) if margin is not None else None,
-                "is_unknown": bool(is_unknown),
-                "unknown_reason": reason,
+                "is_unknown": bool(best_overall["garment_id"] == "unknown"),
+                "unknown_reason": best_overall.get("reason"),
+                "margin": best_overall.get("margin"),
             },
         }
 
         if debug:
-            # include per-crop top images + per-crop top garments
             response["debug"] = {
                 "per_crop": {
                     tag: {
                         "best": per_crop[tag]["best"],
-                        "top_garments": per_crop[tag]["top_garments"][:top_k_garments],
+                        "top_garments": [
+                            {**g, "category": self.garment_category.get(g["garment_id"])}
+                            for g in per_crop[tag]["top_garments"][:top_k_garments]
+                        ],
                         "top_images": per_crop[tag]["top_images"][:top_k_images],
                     }
                     for tag in per_crop

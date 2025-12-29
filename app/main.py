@@ -1,15 +1,18 @@
 # app/main.py
 import os
 
-# If your Mac is finicky, these help stability (you already used them in shell).
-# Keeping them here prevents “forgot to export” issues.
+# Mac stability knobs. (You can still export these in shell; this helps avoid “forgot to export”.)
+# NOTE: If you still hit the libomp duplicate init crash, launch uvicorn with:
+#   KMP_DUPLICATE_LIB_OK=TRUE python -m uvicorn app.main:app ...
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "1")
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # pragmatic Mac workaround
 
 from io import BytesIO
-from fastapi import FastAPI, File, HTTPException, UploadFile, Query
+
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from PIL import Image
 
 from app.retrieval import GarmentRetriever
@@ -66,7 +69,7 @@ async def query(
         raise HTTPException(status_code=400, detail="Empty file")
 
     try:
-        img = Image.open(BytesIO(content))
+        img = Image.open(BytesIO(content)).convert("RGB")
     except Exception:
         raise HTTPException(status_code=400, detail="Could not decode image")
 
